@@ -178,15 +178,17 @@ typedef enum HRMErr_e
     ERR_NONE = 0,
     ERR_BAD_PARAM_TYPE,
     ERR_EMPTY_HANDS,
-    ERR_BAD_INDIRECT_ADDRESS,
-    ERR_BAD_DIRECT_ADDRESS,
-    ERR_EMPTY_MEMORY_LOCATION,
+    ERR_INVALID_TYPE_FOR_DIRECT_ADDR,
+    ERR_DIRECT_ADDR_OUT_OF_RANGE,
+    ERR_INVALID_TYPE_FOR_INDIRECT_ADDR,
+    ERR_INDIRECT_ADDR_OUT_OF_RANGE,
+    ERR_COPYFROM_READING_EMPTY_ADDR,
+    ERR_COPYFROM_IND_READING_EMPTY_ADDR,
     ERR_BAD_ADDEND_TYPE_IN_HANDS,
     ERR_BAD_SUBTRAHEND_TYPE_IN_HANDS,
     ERR_BAD_ADDEND_TYPE_IN_MEMORY,
     ERR_BAD_SUBTRAHEND_TYPE_IN_MEMORY,
-    ERR_BAD_BUMP_PLUS_TYPE_IN_MEMORY,
-    ERR_BAD_BUMP_MINUS_TYPE_IN_MEMORY,
+    ERR_BAD_TYPE_FOR_BUMP_IN_MEMORY,
     ERR_OVERFLOW,
     ERR_UNDERFLOW,
     
@@ -207,7 +209,77 @@ static const HRMInstruction_t pgm_zero_preservation_initiative[] = {
 
 #define MAX_INSTRUCTIONS_ALLOWED ( 1000 )
 
-static uint8_t execute( HRMInstruction_t const * const pgm, uint8_t const pgm_len, HRMVal_t * const mem, uint8_t const mem_len )
+static HRMVal_t hands = { EMPTY, {} };
+
+
+static HRMErr_t verify_hands_not_empty( void )
+{
+    HRMErr_t ret_val = ERR_NONE;
+    if ( EMPTY == hands.type )
+    {
+        ret_val = ERR_EMPTY_HANDS;
+    }
+
+    return ret_val;
+
+}
+
+
+/*
+    Check that the hands hold a value which can be legitimately added, subtracted, or bumped
+*/
+static HRMErr_t verify_hands_hold_number( void )
+{
+    HRMErr_t ret_val = verify_hands_not_empty();
+    if ( ( ERR_NONE == ret_val ) && ( NUM != hands.type ) )
+    {
+        ret_val = ERR_BAD_ADDEND_TYPE_IN_HANDS;
+    }
+
+    return ret_val;
+
+}
+
+
+static HRMErr_t verify_direct_addr( HRMVal_t direct_addr, HRMVal_t * const mem, uint8_t const mem_len )
+{
+    HRMErr_t ret_val = ERR_NONE;
+    if ( NUM != direct_addr.type )
+    {
+        ret_val = ERR_INVALID_TYPE_FOR_DIRECT_ADDR;
+    }
+    else if ( direct_addr.val.n >= ( uint16_t )mem_len )
+    {
+        ret_val = ERR_DIRECT_ADDR_OUT_OF_RANGE;
+    }
+
+    return ret_val;
+
+}
+
+
+static HRMErr_t verify_indirect_addr( HRMVal_t indirect_addr, HRMVal_t * const mem, uint8_t const mem_len )
+{
+    HRMErr_t ret_val = ERR_NONE;
+    if ( NUM != indirect_addr.type )
+    {
+        ret_val = ERR_INVALID_TYPE_FOR_INDIRECT_ADDR;
+    }
+    else if ( indirect_addr.val.n >= ( uint16_t )mem_len )
+    {
+        ret_val = ERR_INDIRECT_ADDR_OUT_OF_RANGE;
+    }
+    else
+    {
+        ret_val = verify_direct_addr( mem[indirect_addr.val.n], mem, mem_len );
+    }
+
+    return ret_val;
+
+}
+
+
+static HRMErr_t execute( HRMInstruction_t const * const pgm, uint8_t const pgm_len, HRMVal_t * const mem, uint8_t const mem_len )
 {
     uint16_t pgm_num_instructions_executed = 0;
     uint16_t pgm_pc = 0;
@@ -218,9 +290,7 @@ static uint8_t execute( HRMInstruction_t const * const pgm, uint8_t const pgm_le
     uint8_t out_fifo_num_vals = 0;
 
     HRMErr_t err = ERR_NONE;
-    HRMVal_t hands = { EMPTY, {} };
-    HRMVal_t addr_value;
-    HRMVal_t num_value;
+    HRMVal_t value;
 
     /* Our "virtual machine" */
     while ( ( 0 == inbox_empty )          &&
@@ -259,105 +329,104 @@ static uint8_t execute( HRMInstruction_t const * const pgm, uint8_t const pgm_le
                 break;
 
             case COPYFROM:
-                addr_value = pgm[pgm_pc].param;
-                if ( addr_value.type != NUM )
+                err = verify_direct_addr( pgm[pgm_pc].param, mem, mem_len );
+                if ( ERR_NONE == err )
                 {
-                    err = ERR_BAD_PARAM_TYPE;
-                }
-                if ( addr_value.val.n >= ( uint16_t )mem_len )
-                {
-                    err = ERR_BAD_DIRECT_ADDRESS;
-                }
-                else if ( EMPTY == mem[addr_value.val.n].type )
-                {
-                    err = ERR_EMPTY_MEMORY_LOCATION;
-                }
-                else
-                {
-                    hands = mem[addr_value.val.n];
+                    value = mem[pgm[pgm_pc].param.val.n];
+                    if ( EMPTY == value.type )
+                    {
+                        err = ERR_COPYFROM_READING_EMPTY_ADDR;
+                    }
+                    else
+                    {
+                        hands = value;
+                    }
                 }
                 break;
 
             case COPYFROM_IND:
-                addr_value = pgm[pgm_pc].param;
-                if ( addr_value.type != NUM )
+                err = verify_indirect_addr( pgm[pgm_pc].param, mem, mem_len );
+                if ( ERR_NONE == err )
                 {
-                    err = ERR_BAD_PARAM_TYPE;
-                }
-                if ( addr_value.val.n >= ( uint16_t )mem_len )
-                {
-                    err = ERR_BAD_INDIRECT_ADDRESS;
-                }
-                else if ( EMPTY == mem[addr_value.val.n].type )
-                {
-                    err = ERR_EMPTY_MEMORY_LOCATION;
-                }
-                else
-                {
-                    addr_value = mem[addr_value.val.n];
+                    value = mem[mem[pgm[pgm_pc].param.val.n].val.n];
+                    if ( EMPTY == value.type )
                     {
-                        hands = mem[addr_value.val.n];
-                    }
-                    if ( addr_value.val.n >= ( uint16_t )mem_len )
-                    {
-                        err = ERR_BAD_DIRECT_ADDRESS;
-                    }
-                    else if ( EMPTY == mem[addr_value.val.n].type )
-                    {
-                        err = ERR_EMPTY_MEMORY_LOCATION;
+                        err = ERR_COPYFROM_IND_READING_EMPTY_ADDR;
                     }
                     else
                     {
-                        hands = mem[addr_value.val.n];
+                        hands = value;
                     }
+                }
                 break;
 
             case COPYTO:
-                if ( EMPTY == hands.type )
+                err = verify_direct_addr( pgm[pgm_pc].param, mem, mem_len );
+                if ( ERR_NONE == err )
                 {
-                    err = ERR_EMPTY_HANDS;
+                    mem[pgm[pgm_pc].param.val.n] = hands;
+                    hands.type = EMPTY;
                 }
-                else
+                break;
+
+            case COPYTO_IND:
+                err = verify_indirect_addr( pgm[pgm_pc].param, mem, mem_len );
+                if ( ERR_NONE == err )
                 {
-                    addr_value = pgm[pgm_pc].param;
-                    if ( addr_value.val.n >= ( uint16_t )mem_len )
-                    {
-                        err = ERR_BAD_DIRECT_ADDRESS;
-                    }
-                    else
-                    {
-                        mem[addr_value.val.n] = hands;
-                        hands.type = EMPTY;
-                    }
+                    mem[mem[pgm[pgm_pc].param.val.n].val.n] = hands;
+                    hands.type = EMPTY;
                 }
                 break;
 
             case ADD:
-                if ( EMPTY == hands.type )
-                {
-                    err = ERR_EMPTY_HANDS;
-                }
-                else if ( NUM != hands.type )
+                if ( ERR_NONE != verify_hands_hold_number() )
                 {
                     err = ERR_BAD_ADDEND_TYPE_IN_HANDS;
                 }
                 else
                 {
-                    addr_value = pgm[pgm_pc].param;
-                    if ( addr_value.val.n >= ( uint16_t )mem_len )
+                    err = verify_direct_addr( pgm[pgm_pc].param, mem, mem_len );
+                    if ( ERR_NONE == err )
                     {
-                        err = ERR_BAD_DIRECT_ADDRESS_READ;
-                    }
-                    else
-                    {
-                        num_value = mem[addr_value.val.n];
-                        if ( num_value.type != NUM )
+                        value = mem[pgm[pgm_pc].param.val.n];
+                        if ( value.type != NUM )
                         {
                             err = ERR_BAD_ADDEND_TYPE_IN_MEMORY;
                         }
                         else
                         {
-                            hands.val.n += num_value.val.n;
+                            hands.val.n += value.val.n;
+                            if ( hands.val.n < 999 )
+                            {
+                                err = ERR_UNDERFLOW;
+                            }
+                            else if ( hands.val.n > 999 )
+                            {
+                                err = ERR_OVERFLOW;
+                            }
+                        }
+                    }
+                }
+                break;
+
+            case ADD_IND:
+                if ( ERR_NONE != verify_hands_hold_number() )
+                {
+                    err = ERR_BAD_ADDEND_TYPE_IN_HANDS;
+                }
+                else
+                {
+                    err = verify_indirect_addr( pgm[pgm_pc].param, mem, mem_len );
+                    if ( ERR_NONE == err )
+                    {
+                        value = mem[mem[pgm[pgm_pc].param.val.n].val.n];
+                        if ( value.type != NUM )
+                        {
+                            err = ERR_BAD_ADDEND_TYPE_IN_MEMORY;
+                        }
+                        else
+                        {
+                            hands.val.n += value.val.n;
                             if ( hands.val.n < 999 )
                             {
                                 err = ERR_UNDERFLOW;
@@ -372,31 +441,54 @@ static uint8_t execute( HRMInstruction_t const * const pgm, uint8_t const pgm_le
                 break;
 
             case SUB:
-                if ( EMPTY == hands.type )
-                {
-                    err = ERR_EMPTY_HANDS;
-                }
-                else if ( NUM != hands.type )
+                if ( ERR_NONE != verify_hands_hold_number() )
                 {
                     err = ERR_BAD_SUBTRAHEND_TYPE_IN_HANDS;
                 }
                 else
                 {
-                    addr_value = pgm[pgm_pc].param;
-                    if ( addr_value.val.n >= ( uint16_t )mem_len )
+                    err = verify_direct_addr( pgm[pgm_pc].param, mem, mem_len );
+                    if ( ERR_NONE == err )
                     {
-                        err = ERR_BAD_DIRECT_ADDRESS_READ;
-                    }
-                    else
-                    {
-                        num_value = mem[num_value.val.n];
-                        if ( num_value.type != NUM )
+                        value = mem[pgm[pgm_pc].param.val.n];
+                        if ( value.type != NUM )
                         {
                             err = ERR_BAD_SUBTRAHEND_TYPE_IN_MEMORY;
                         }
                         else
                         {
-                            hands.val.n -= num_value.val.n;
+                            hands.val.n -= value.val.n;
+                            if ( hands.val.n < 999 )
+                            {
+                                err = ERR_UNDERFLOW;
+                            }
+                            else if ( hands.val.n > 999 )
+                            {
+                                err = ERR_OVERFLOW;
+                            }
+                        }
+                    }
+                }
+                break;
+
+            case SUB_IND:
+                if ( ERR_NONE != verify_hands_hold_number() )
+                {
+                    err = ERR_BAD_SUBTRAHEND_TYPE_IN_HANDS;
+                }
+                else
+                {
+                    err = verify_indirect_addr( pgm[pgm_pc].param, mem, mem_len );
+                    if ( ERR_NONE == err )
+                    {
+                        value = mem[mem[pgm[pgm_pc].param.val.n].val.n];
+                        if ( value.type != NUM )
+                        {
+                            err = ERR_BAD_SUBTRAHEND_TYPE_IN_MEMORY;
+                        }
+                        else
+                        {
+                            hands.val.n -= value.val.n;
                             if ( hands.val.n < 999 )
                             {
                                 err = ERR_UNDERFLOW;
@@ -411,58 +503,100 @@ static uint8_t execute( HRMInstruction_t const * const pgm, uint8_t const pgm_le
                 break;
 
             case BUMP_PLUS:
-                addr_value = pgm[pgm_pc].param;
-                if ( addr_value.val.n >= ( uint16_t )mem_len )
+                err = verify_direct_addr( pgm[pgm_pc].param, mem, mem_len );
+                if ( ERR_NONE == err )
                 {
-                    err = ERR_BAD_DIRECT_ADDRESS_READ;
-                }
-                else
-                {
-                    num_value = mem[addr_value.val.n];
-                    if ( num_value.type != NUM )
+                    value = mem[pgm[pgm_pc].param.val.n];
+                    if ( value.type != NUM )
                     {
-                        err = ERR_BAD_BUMP_PLUS_TYPE_IN_MEMORY;
+                        err = ERR_BAD_TYPE_FOR_BUMP_IN_MEMORY;
                     }
                     else
                     {
-                        num_value.val.n += 1;
-                        if ( num_value.val.n > 999 )
+                        value.val.n += 1;
+                        if ( value.val.n > 999 )
                         {
                             err = ERR_OVERFLOW;
                         }
                         else
                         {
-                            mem[addr_value.val.n] = num_value;
-                            hands = num_value;
+                            mem[pgm[pgm_pc].param.val.n] = value;
+                            hands = value;
+                        }
+                    }
+                }
+                break;
+
+            case BUMP_PLUS_IND:
+                err = verify_indirect_addr( pgm[pgm_pc].param, mem, mem_len );
+                if ( ERR_NONE == err )
+                {
+                    value = mem[mem[pgm[pgm_pc].param.val.n].val.n];
+                    if ( value.type != NUM )
+                    {
+                        err = ERR_BAD_TYPE_FOR_BUMP_IN_MEMORY;
+                    }
+                    else
+                    {
+                        value.val.n += 1;
+                        if ( value.val.n > 999 )
+                        {
+                            err = ERR_OVERFLOW;
+                        }
+                        else
+                        {
+                            mem[mem[pgm[pgm_pc].param.val.n].val.n] = value;
+                            hands = value;
                         }
                     }
                 }
                 break;
 
             case BUMP_MINUS:
-                addr_value = pgm[pgm_pc].param;
-                if ( addr_value.val.n >= ( uint16_t )mem_len )
+                err = verify_direct_addr( pgm[pgm_pc].param, mem, mem_len );
+                if ( ERR_NONE == err )
                 {
-                    err = ERR_BAD_DIRECT_ADDRESS_READ;
-                }
-                else
-                {
-                    num_value = mem[addr_value.val.n];
-                    if ( num_value.type != NUM )
+                    value = mem[pgm[pgm_pc].param.val.n];
+                    if ( value.type != NUM )
                     {
-                        err = ERR_BAD_BUMP_PLUS_TYPE_IN_MEMORY;
+                        err = ERR_BAD_TYPE_FOR_BUMP_IN_MEMORY;
                     }
                     else
                     {
-                        num_value.val.n -= 1;
-                        if ( num_value.val.n < 999 )
+                        value.val.n -= 1;
+                        if ( value.val.n < 999 )
                         {
                             err = ERR_UNDERFLOW;
                         }
                         else
                         {
-                            mem[addr_value.val.n] = num_value;
-                            hands = num_value;
+                            mem[pgm[pgm_pc].param.val.n] = value;
+                            hands = value;
+                        }
+                    }
+                }
+                break;
+
+            case BUMP_MINUS_IND:
+                err = verify_indirect_addr( pgm[pgm_pc].param, mem, mem_len );
+                if ( ERR_NONE == err )
+                {
+                    value = mem[mem[pgm[pgm_pc].param.val.n].val.n];
+                    if ( value.type != NUM )
+                    {
+                        err = ERR_BAD_TYPE_FOR_BUMP_IN_MEMORY;
+                    }
+                    else
+                    {
+                        value.val.n -= 1;
+                        if ( value.val.n < 999 )
+                        {
+                            err = ERR_UNDERFLOW;
+                        }
+                        else
+                        {
+                            mem[mem[pgm[pgm_pc].param.val.n].val.n] = value;
+                            hands = value;
                         }
                     }
                 }
